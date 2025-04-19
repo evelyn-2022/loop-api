@@ -11,6 +11,19 @@ spring:
     database-platform: org.hibernate.dialect.H2Dialect
     show-sql: true
 
+  mail:
+    host: smtp.example.com
+    port: 587
+    username: test@example.com
+    password: dummy
+
+server:
+  servlet:
+    context-path: /api/v1
+
+app:
+  base-url: https://example.com
+
 jwt:
   secret: "test-secret-should-be-at-least-32-bytes-long!"
   accessExpirationMs: 86400000

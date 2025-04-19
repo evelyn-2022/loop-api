@@ -36,6 +36,9 @@ public class User {
 	@Column(nullable = false)
 	private boolean admin = false;
 
+	@Column(nullable = false)
+	private boolean verified = false;
+
 	@Column
 	private String profileUrl;
 }

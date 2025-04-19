@@ -1,13 +1,12 @@
 package com.loop.api.modules.auth.service;
 
-import com.loop.api.common.exception.InvalidCredentialsException;
-import com.loop.api.common.exception.InvalidTokenException;
-import com.loop.api.common.exception.UserAlreadyExistsException;
-import com.loop.api.common.exception.UserNotFoundException;
+import com.loop.api.common.exception.*;
 import com.loop.api.modules.auth.dto.LoginRequest;
 import com.loop.api.modules.auth.dto.LoginResponse;
 import com.loop.api.modules.auth.dto.RegisterRequest;
 import com.loop.api.modules.auth.model.RefreshToken;
+import com.loop.api.modules.auth.model.VerificationToken;
+import com.loop.api.modules.auth.repository.VerificationTokenRepository;
 import com.loop.api.modules.user.model.User;
 import com.loop.api.modules.user.repository.UserRepository;
 import com.loop.api.security.JwtTokenProvider;
@@ -25,6 +24,8 @@ import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -37,11 +38,15 @@ public class AuthServiceTest {
 	@Mock
 	private UserRepository userRepository;
 	@Mock
+	private VerificationTokenRepository verificationTokenRepository;
+	@Mock
 	private PasswordEncoder passwordEncoder;
 	@Mock
 	private AuthenticationManager authenticationManager;
 	@Mock
 	private RefreshTokenService refreshTokenService;
+	@Mock
+	private EmailService emailService;
 	@Mock
 	private JwtTokenProvider jwtTokenProvider;
 
@@ -51,6 +56,7 @@ public class AuthServiceTest {
 	@Nested
 	@DisplayName("Tests for signup service")
 	class RegisterTests {
+
 		@Test
 		@DisplayName("Should register user successfully")
 		void shouldRegisterUserSuccessfully() {
@@ -64,6 +70,8 @@ public class AuthServiceTest {
 
 			assertEquals("User registered successfully", result);
 			verify(userRepository).save(any(User.class));
+			verify(verificationTokenRepository).save(any(VerificationToken.class));
+			verify(emailService).sendVerificationEmail(eq("new@example.com"), anyString());
 		}
 
 		@Test
@@ -78,6 +86,10 @@ public class AuthServiceTest {
 					.thenReturn(Optional.of(existingUser));
 
 			assertThrows(UserAlreadyExistsException.class, () -> authService.registerUser(request));
+
+			verify(userRepository, never()).save(any());
+			verify(verificationTokenRepository, never()).save(any());
+			verify(emailService, never()).sendVerificationEmail(any(), any());
 		}
 
 		@Test
@@ -87,27 +99,145 @@ public class AuthServiceTest {
 
 			User existingUser = new User();
 			existingUser.setId(123L);
+
 			when(userRepository.findByEmail("exists@example.com")).thenReturn(Optional.empty());
 			when(userRepository.findByUsername("existinguser")).thenReturn(Optional.of(existingUser));
 
 			assertThrows(UserAlreadyExistsException.class, () -> authService.registerUser(request));
+
+			verify(userRepository, never()).save(any());
+			verify(verificationTokenRepository, never()).save(any());
+			verify(emailService, never()).sendVerificationEmail(any(), any());
 		}
 
 		@Test
 		@DisplayName("Should throw RuntimeException when saving user fails unexpectedly")
 		void shouldThrowRuntimeExceptionOnUnexpectedSaveFailure() {
 			RegisterRequest request = new RegisterRequest("new@example.com", "password", "newuser");
-			request.setEmail("new@example.com");
 
 			when(userRepository.findByEmail("new@example.com")).thenReturn(Optional.empty());
 			when(userRepository.findByUsername("newuser")).thenReturn(Optional.empty());
-			when(passwordEncoder.encode(any())).thenReturn("encoded");
-			doThrow(new RuntimeException("DB error")).when(userRepository).save(any(User.class));
+			when(passwordEncoder.encode("password")).thenReturn("encoded");
+
+			doThrow(new RuntimeException("DB error")).when(userRepository).save(any());
 
 			RuntimeException ex = assertThrows(RuntimeException.class,
 					() -> authService.registerUser(request));
 
 			assertTrue(ex.getMessage().contains("Error registering user"));
+
+			verify(verificationTokenRepository, never()).save(any());
+			verify(emailService, never()).sendVerificationEmail(any(), any());
+		}
+	}
+
+
+	@Nested
+	@DisplayName("Tests for email verification")
+	class EmailVerificationTests {
+
+		@Test
+		@DisplayName("Should verify user and delete token if token is valid and not expired")
+		void shouldVerifyUserSuccessfully() {
+			String token = "valid-token";
+
+			User user = new User();
+			user.setVerified(false);
+
+			VerificationToken verificationToken = new VerificationToken();
+			verificationToken.setToken(token);
+			verificationToken.setUser(user);
+			verificationToken.setExpiryDate(Instant.now().plus(Duration.ofHours(1)));
+
+			when(verificationTokenRepository.findByToken(token))
+					.thenReturn(Optional.of(verificationToken));
+
+			authService.verifyEmailToken(token);
+
+			assertTrue(user.isVerified(), "User should be marked as verified");
+			verify(userRepository).save(user);
+			verify(verificationTokenRepository).delete(verificationToken);
+		}
+
+		@Test
+		@DisplayName("Should throw InvalidTokenException when token is not found")
+		void shouldThrowWhenTokenNotFound() {
+			String token = "invalid-token";
+
+			when(verificationTokenRepository.findByToken(token))
+					.thenReturn(Optional.empty());
+
+			assertThrows(InvalidTokenException.class,
+					() -> authService.verifyEmailToken(token));
+		}
+
+		@Test
+		@DisplayName("Should throw InvalidTokenException when token is expired")
+		void shouldThrowWhenTokenIsExpired() {
+			String token = "expired-token";
+
+			User user = new User();
+			VerificationToken expiredToken = new VerificationToken();
+			expiredToken.setToken(token);
+			expiredToken.setUser(user);
+			expiredToken.setExpiryDate(Instant.now().minus(Duration.ofHours(1)));
+
+			when(verificationTokenRepository.findByToken(token))
+					.thenReturn(Optional.of(expiredToken));
+
+			assertThrows(InvalidTokenException.class,
+					() -> authService.verifyEmailToken(token));
+		}
+	}
+
+	@Nested
+	@DisplayName("Tests for resending verification email")
+	class ResendVerificationTests {
+
+		@Test
+		@DisplayName("Should resend verification email if user is not verified")
+		void shouldResendVerificationEmailSuccessfully() {
+			User user = new User();
+			user.setEmail("test@example.com");
+			user.setVerified(false);
+
+			when(userRepository.findByEmail("test@example.com")).thenReturn(Optional.of(user));
+
+			authService.resendVerificationEmail("test@example.com");
+
+			verify(verificationTokenRepository).deleteByUser(user);
+			verify(verificationTokenRepository).save(any(VerificationToken.class));
+			verify(emailService).sendVerificationEmail(eq("test@example.com"), anyString());
+		}
+
+		@Test
+		@DisplayName("Should throw UserNotFoundException if user is not found")
+		void shouldThrowIfUserNotFound() {
+			when(userRepository.findByEmail("missing@example.com")).thenReturn(Optional.empty());
+
+			assertThrows(UserNotFoundException.class, () ->
+					authService.resendVerificationEmail("missing@example.com"));
+
+			verifyNoInteractions(verificationTokenRepository);
+			verifyNoInteractions(emailService);
+		}
+
+		@Test
+		@DisplayName("Should throw UserAlreadyVerifiedException if user is already verified")
+		void shouldThrowIfUserAlreadyVerified() {
+			User user = new User();
+			user.setEmail("verified@example.com");
+			user.setVerified(true);
+
+			when(userRepository.findByEmail("verified@example.com")).thenReturn(Optional.of(user));
+
+			UserAlreadyVerifiedException ex = assertThrows(UserAlreadyVerifiedException.class, () ->
+					authService.resendVerificationEmail("verified@example.com"));
+
+			assertTrue(ex.getMessage().contains("already verified"));
+
+			verify(verificationTokenRepository, never()).deleteByUser(any());
+			verify(emailService, never()).sendVerificationEmail(any(), any());
 		}
 	}
 

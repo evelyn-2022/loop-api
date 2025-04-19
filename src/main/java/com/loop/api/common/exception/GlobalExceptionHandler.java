@@ -75,6 +75,13 @@ public class GlobalExceptionHandler {
 		return ResponseEntity.badRequest().body(StandardResponse.error(HttpStatus.BAD_REQUEST, message));
 	}
 
+	@ExceptionHandler(UserAlreadyVerifiedException.class)
+	public ResponseEntity<StandardResponse<Void>> handleUserAlreadyVerified(UserAlreadyVerifiedException ex) {
+		return ResponseEntity
+				.status(HttpStatus.BAD_REQUEST)
+				.body(StandardResponse.error(HttpStatus.BAD_REQUEST, ex.getMessage()));
+	}
+
 	@ExceptionHandler(Exception.class)
 	public ResponseEntity<StandardResponse<Void>> handleGlobalException(Exception ex) {
 		return ResponseEntity
